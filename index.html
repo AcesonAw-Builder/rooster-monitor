@@ -1,0 +1,1427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rooster — Clinical Alert Monitor</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: {
+              900: '#0d1117',
+              800: '#161b22',
+              750: '#1a2030',
+              700: '#21262d',
+              600: '#30363d',
+              500: '#3d444d',
+              400: '#4d5562',
+            },
+            accent: {
+              blue:   '#58a6ff',
+              green:  '#3fb950',
+              red:    '#f85149',
+              orange: '#d29922',
+              purple: '#bc8cff',
+              teal:   '#39d2bd',
+              pink:   '#e879f9',
+            },
+          },
+          fontFamily: {
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0d1117; color: #e6edf3; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #161b22; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4d5562; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+    @keyframes flash-row { 0%, 100% { background-color: transparent; } 50% { background-color: rgba(248,81,73,0.07); } }
+    .flash-critical { animation: flash-row 2s ease-in-out infinite; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ─── DATA ────────────────────────────────────────────────────────────────────
+
+const ALERT_TYPES = [
+  'Critical Lab Result', 'Rapid Response', 'Code Blue', 'Falls Risk',
+  'Sepsis Trigger', 'Deteriorating Patient', 'Unexpected Pathology',
+  'Critical Imaging', 'Medication Alert', 'Cardiac Rhythm',
+];
+
+const SPECIALTIES = [
+  'General Surgery', 'Internal Medicine', 'Cardiology', 'Neurology',
+  'Oncology', 'Orthopaedics', 'ICU', 'A&E', 'Haematology', 'Nephrology',
+];
+
+const WARDS = [
+  '5A', '5B', '6C', '7D', '8A', 'ICU-1', 'ICU-2', 'A&E', 'CCU', '3B', '4A',
+];
+
+const CLINICIANS = [
+  { name: 'Dr. Lim Wei Jian',    role: 'Registrar',   specialty: 'Internal Medicine' },
+  { name: 'Dr. Priya Nair',      role: 'Consultant',  specialty: 'Cardiology' },
+  { name: 'Dr. Tan Kai Ming',    role: 'MO',          specialty: 'General Surgery' },
+  { name: 'Dr. Sarah Chen',      role: 'Consultant',  specialty: 'Neurology' },
+  { name: 'Dr. Ravi Subramaniam',role: 'Registrar',   specialty: 'Oncology' },
+  { name: 'Dr. Michelle Ong',    role: 'Registrar',   specialty: 'ICU' },
+  { name: 'Dr. James Foo',       role: 'Consultant',  specialty: 'Haematology' },
+  { name: 'Dr. Aisha Rahman',    role: 'MO',          specialty: 'A&E' },
+  { name: 'Dr. Ng Boon Kiat',    role: 'Registrar',   specialty: 'Nephrology' },
+];
+
+const STATUSES = ['active', 'escalated', 'resolved', 'no-coverage'];
+
+// ─── ROUTING RULES ────────────────────────────────────────────────────────────
+// Simulated on-call rosters keyed by "HOSPITAL:SPECIALTY"
+// Each entry: primary clinician + 3-level escalation chain
+
+function makeClinicianEntry(name, role, phoneDigits, start, end) {
+  return { name, role, phone: `+65 ${phoneDigits}`, onCallStart: start, onCallEnd: end };
+}
+
+const ROUTING_RULES = {
+  'SGH:Haematology': {
+    primary: makeClinicianEntry('Dr. James Foo', 'Consultant', '9182 3344', '08:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. James Foo', 'Consultant', '9182 3344', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Ng Boon Kiat', 'Registrar', '9034 8821', '00:00', '23:59'),
+    ],
+  },
+  'SGH:Cardiology': {
+    primary: makeClinicianEntry('Dr. Priya Nair', 'Consultant', '9312 7788', '07:00', '19:00'),
+    chain: [
+      makeClinicianEntry('Dr. Priya Nair', 'Consultant', '9312 7788', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Tan Kai Ming', 'Registrar', '9401 2233', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Sarah Chen', 'Consultant', '9588 4411', '00:00', '23:59'),
+    ],
+  },
+  'SGH:ICU': {
+    primary: makeClinicianEntry('Dr. Michelle Ong', 'Registrar', '9667 0091', '07:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. Michelle Ong', 'Registrar', '9667 0091', '07:00', '20:00'),
+      makeClinicianEntry('Dr. Ravi Subramaniam', 'Registrar', '9723 5544', '07:00', '20:00'),
+      makeClinicianEntry('Dr. James Foo', 'Consultant', '9182 3344', '00:00', '23:59'),
+    ],
+  },
+  'SGH:General Surgery': {
+    primary: makeClinicianEntry('Dr. Tan Kai Ming', 'MO', '9401 2233', '08:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. Tan Kai Ming', 'MO', '9401 2233', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Priya Nair', 'Consultant', '9312 7788', '00:00', '23:59'),
+    ],
+  },
+  'SGH:Nephrology': {
+    primary: makeClinicianEntry('Dr. Ng Boon Kiat', 'Registrar', '9034 8821', '08:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. Ng Boon Kiat', 'Registrar', '9034 8821', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '08:00', '20:00'),
+      makeClinicianEntry('Dr. James Foo', 'Consultant', '9182 3344', '00:00', '23:59'),
+    ],
+  },
+  'TTSH:Internal Medicine': {
+    primary: makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '07:00', '19:00'),
+    chain: [
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Aisha Rahman', 'MO', '9839 2201', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Sarah Chen', 'Consultant', '9588 4411', '00:00', '23:59'),
+    ],
+  },
+  'TTSH:Neurology': {
+    primary: makeClinicianEntry('Dr. Sarah Chen', 'Consultant', '9588 4411', '08:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. Sarah Chen', 'Consultant', '9588 4411', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Ng Boon Kiat', 'Registrar', '9034 8821', '00:00', '23:59'),
+    ],
+  },
+  'TTSH:A&E': {
+    primary: makeClinicianEntry('Dr. Aisha Rahman', 'MO', '9839 2201', '07:00', '19:00'),
+    chain: [
+      makeClinicianEntry('Dr. Aisha Rahman', 'MO', '9839 2201', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Tan Kai Ming', 'MO', '9401 2233', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Michelle Ong', 'Registrar', '9667 0091', '00:00', '23:59'),
+    ],
+  },
+  'NUH:Oncology': {
+    primary: makeClinicianEntry('Dr. Ravi Subramaniam', 'Registrar', '9723 5544', '08:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. Ravi Subramaniam', 'Registrar', '9723 5544', '08:00', '20:00'),
+      makeClinicianEntry('Dr. James Foo', 'Consultant', '9182 3344', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Priya Nair', 'Consultant', '9312 7788', '00:00', '23:59'),
+    ],
+  },
+  'NUH:Internal Medicine': {
+    primary: makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '08:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Aisha Rahman', 'MO', '9839 2201', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Sarah Chen', 'Consultant', '9588 4411', '00:00', '23:59'),
+    ],
+  },
+  'CGH:Nephrology': {
+    primary: makeClinicianEntry('Dr. Ng Boon Kiat', 'Registrar', '9034 8821', '07:00', '19:00'),
+    chain: [
+      makeClinicianEntry('Dr. Ng Boon Kiat', 'Registrar', '9034 8821', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '07:00', '19:00'),
+      makeClinicianEntry('Dr. James Foo', 'Consultant', '9182 3344', '00:00', '23:59'),
+    ],
+  },
+  'CGH:General Surgery': {
+    primary: makeClinicianEntry('Dr. Tan Kai Ming', 'MO', '9401 2233', '07:00', '19:00'),
+    chain: [
+      makeClinicianEntry('Dr. Tan Kai Ming', 'MO', '9401 2233', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Ravi Subramaniam', 'Registrar', '9723 5544', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Michelle Ong', 'Registrar', '9667 0091', '00:00', '23:59'),
+    ],
+  },
+  'KKH:Orthopaedics': {
+    primary: makeClinicianEntry('Dr. Chan Hui Lin', 'Registrar', '9145 7732', '08:00', '20:00'),
+    chain: [
+      makeClinicianEntry('Dr. Chan Hui Lin', 'Registrar', '9145 7732', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Tan Kai Ming', 'MO', '9401 2233', '08:00', '20:00'),
+      makeClinicianEntry('Dr. Lim Wei Jian', 'Registrar', '9271 5567', '00:00', '23:59'),
+    ],
+  },
+  'KKH:A&E': {
+    primary: makeClinicianEntry('Dr. Aisha Rahman', 'MO', '9839 2201', '07:00', '19:00'),
+    chain: [
+      makeClinicianEntry('Dr. Aisha Rahman', 'MO', '9839 2201', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Chan Hui Lin', 'Registrar', '9145 7732', '07:00', '19:00'),
+      makeClinicianEntry('Dr. Michelle Ong', 'Registrar', '9667 0091', '00:00', '23:59'),
+    ],
+  },
+};
+
+function timeToMinutes(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function isOnCall(clinician, timeHHMM) {
+  const t = timeToMinutes(timeHHMM);
+  const start = timeToMinutes(clinician.onCallStart);
+  const end = timeToMinutes(clinician.onCallEnd);
+  return t >= start && t <= end;
+}
+
+function minutesToHandover(clinician, timeHHMM) {
+  const t = timeToMinutes(timeHHMM);
+  const end = timeToMinutes(clinician.onCallEnd);
+  return end - t;
+}
+
+function genId(prefix, n) {
+  return `${prefix}-${String(n).padStart(6, '0')}`;
+}
+
+function randomFrom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function minutesAgo(m) {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - m);
+  return d;
+}
+
+const INITIAL_ALERTS = [
+  {
+    id: 'ALT-2026-000391', patientId: 'SGH-2024-001847', mrn: '4891203',
+    alertType: 'Critical Lab Result', ward: 'ICU-1', bed: '3',
+    status: 'active', priority: 'critical',
+    specialty: 'Haematology',
+    assignedTo: CLINICIANS[6],
+    escalationLevel: 1, escalationMax: 3,
+    routedAt: minutesAgo(2), acknowledgedAt: null,
+    smsDelivered: true, smsFailed: false,
+    detail: 'Platelet count 18 × 10⁹/L (ref ≥150)',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'SGH',
+  },
+  {
+    id: 'ALT-2026-000389', patientId: 'TTSH-2024-003312', mrn: '7734891',
+    alertType: 'Sepsis Trigger', ward: '5A', bed: '11B',
+    status: 'escalated', priority: 'critical',
+    specialty: 'Internal Medicine',
+    assignedTo: CLINICIANS[0],
+    escalationLevel: 2, escalationMax: 3,
+    routedAt: minutesAgo(14), acknowledgedAt: null,
+    smsDelivered: true, smsFailed: false,
+    detail: 'SOFA score 6, lactate 4.1 mmol/L',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'TTSH',
+  },
+  {
+    id: 'ALT-2026-000387', patientId: 'SGH-2025-009204', mrn: '2019384',
+    alertType: 'Cardiac Rhythm', ward: 'CCU', bed: '7',
+    status: 'active', priority: 'critical',
+    specialty: 'Cardiology',
+    assignedTo: CLINICIANS[1],
+    escalationLevel: 1, escalationMax: 3,
+    routedAt: minutesAgo(4), acknowledgedAt: null,
+    smsDelivered: true, smsFailed: false,
+    detail: 'New AF with RVR, HR 138 bpm',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'SGH',
+  },
+  {
+    id: 'ALT-2026-000384', patientId: 'NUH-2025-000583', mrn: '6628841',
+    alertType: 'Unexpected Pathology', ward: '7D', bed: '5A',
+    status: 'resolved', priority: 'urgent',
+    specialty: 'Oncology',
+    assignedTo: CLINICIANS[4],
+    escalationLevel: 1, escalationMax: 3,
+    routedAt: minutesAgo(51), acknowledgedAt: minutesAgo(44),
+    smsDelivered: true, smsFailed: false,
+    detail: 'Biopsy: poorly differentiated adenocarcinoma',
+    responseCode: 1,
+    responseTime: 7,
+    hospital: 'NUH',
+  },
+  {
+    id: 'ALT-2026-000382', patientId: 'SGH-2025-011044', mrn: '8837201',
+    alertType: 'Deteriorating Patient', ward: '8A', bed: '2',
+    status: 'escalated', priority: 'critical',
+    specialty: 'General Surgery',
+    assignedTo: CLINICIANS[2],
+    escalationLevel: 3, escalationMax: 3,
+    routedAt: minutesAgo(28), acknowledgedAt: null,
+    smsDelivered: true, smsFailed: false,
+    detail: 'NEWS2 score 9, SBP 82 mmHg',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'SGH',
+  },
+  {
+    id: 'ALT-2026-000381', patientId: 'KKH-2025-007821', mrn: '5510293',
+    alertType: 'Falls Risk', ward: '3B', bed: '14',
+    status: 'no-coverage', priority: 'urgent',
+    specialty: 'Orthopaedics',
+    assignedTo: null,
+    escalationLevel: 3, escalationMax: 3,
+    routedAt: minutesAgo(37), acknowledgedAt: null,
+    smsDelivered: true, smsFailed: true,
+    detail: 'MORSE score 65, recent hip arthroplasty',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'KKH',
+  },
+  {
+    id: 'ALT-2026-000379', patientId: 'TTSH-2025-002917', mrn: '1123788',
+    alertType: 'Critical Imaging', ward: '6C', bed: '9A',
+    status: 'resolved', priority: 'urgent',
+    specialty: 'Neurology',
+    assignedTo: CLINICIANS[3],
+    escalationLevel: 1, escalationMax: 3,
+    routedAt: minutesAgo(73), acknowledgedAt: minutesAgo(68),
+    smsDelivered: true, smsFailed: false,
+    detail: 'CT head: acute SDH 8mm, midline shift 4mm',
+    responseCode: 1,
+    responseTime: 5,
+    hospital: 'TTSH',
+  },
+  {
+    id: 'ALT-2026-000376', patientId: 'SGH-2024-088312', mrn: '9903422',
+    alertType: 'Rapid Response', ward: '4A', bed: '3B',
+    status: 'active', priority: 'critical',
+    specialty: 'ICU',
+    assignedTo: CLINICIANS[5],
+    escalationLevel: 1, escalationMax: 3,
+    routedAt: minutesAgo(1), acknowledgedAt: null,
+    smsDelivered: true, smsFailed: false,
+    detail: 'SpO₂ 82% on 10L/min O₂, GCS 11',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'SGH',
+  },
+  {
+    id: 'ALT-2026-000374', patientId: 'CGH-2025-001204', mrn: '3349021',
+    alertType: 'Critical Lab Result', ward: '5B', bed: '7',
+    status: 'resolved', priority: 'urgent',
+    specialty: 'Nephrology',
+    assignedTo: CLINICIANS[8],
+    escalationLevel: 1, escalationMax: 3,
+    routedAt: minutesAgo(95), acknowledgedAt: minutesAgo(88),
+    smsDelivered: true, smsFailed: false,
+    detail: 'K⁺ 6.9 mmol/L (ref 3.5–5.0)',
+    responseCode: 1,
+    responseTime: 7,
+    hospital: 'CGH',
+  },
+  {
+    id: 'ALT-2026-000370', patientId: 'SGH-2024-071033', mrn: '6671102',
+    alertType: 'Medication Alert', ward: 'ICU-2', bed: '4',
+    status: 'no-coverage', priority: 'critical',
+    specialty: 'ICU',
+    assignedTo: null,
+    escalationLevel: 3, escalationMax: 3,
+    routedAt: minutesAgo(42), acknowledgedAt: null,
+    smsDelivered: false, smsFailed: true,
+    detail: 'Vancomycin trough 28 mg/L — nephrotoxic range',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'SGH',
+  },
+  {
+    id: 'ALT-2026-000368', patientId: 'TTSH-2025-005502', mrn: '8801234',
+    alertType: 'Code Blue', ward: 'A&E', bed: 'Bay 2',
+    status: 'resolved', priority: 'critical',
+    specialty: 'A&E',
+    assignedTo: CLINICIANS[7],
+    escalationLevel: 1, escalationMax: 1,
+    routedAt: minutesAgo(112), acknowledgedAt: minutesAgo(110),
+    smsDelivered: true, smsFailed: false,
+    detail: 'Pulseless VF — CPR in progress',
+    responseCode: 1,
+    responseTime: 2,
+    hospital: 'TTSH',
+  },
+  {
+    id: 'ALT-2026-000365', patientId: 'NUH-2024-019201', mrn: '2290182',
+    alertType: 'Critical Lab Result', ward: '5A', bed: '1',
+    status: 'active', priority: 'urgent',
+    specialty: 'Internal Medicine',
+    assignedTo: CLINICIANS[0],
+    escalationLevel: 1, escalationMax: 3,
+    routedAt: minutesAgo(6), acknowledgedAt: null,
+    smsDelivered: true, smsFailed: false,
+    detail: 'Troponin T 4,200 ng/L (ref <14)',
+    responseCode: null,
+    responseTime: null,
+    hospital: 'NUH',
+  },
+];
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+function relativeTime(date) {
+  if (!date) return '—';
+  const diffMs = Date.now() - date.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  return `${diffHr}h ${diffMin % 60}m ago`;
+}
+
+function formatTime(date) {
+  if (!date) return '—';
+  return date.toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+}
+
+const STATUS_META = {
+  active:      { label: 'ACTIVE',      bg: 'bg-blue-500/15',   text: 'text-blue-400',   border: 'border-blue-500/40',   dot: 'bg-blue-400' },
+  escalated:   { label: 'ESCALATED',   bg: 'bg-orange-500/15', text: 'text-orange-400', border: 'border-orange-500/40', dot: 'bg-orange-400' },
+  resolved:    { label: 'RESOLVED',    bg: 'bg-green-500/15',  text: 'text-green-400',  border: 'border-green-500/40',  dot: 'bg-green-500' },
+  'no-coverage': { label: 'NO COVER',  bg: 'bg-red-500/15',    text: 'text-red-400',    border: 'border-red-500/40',    dot: 'bg-red-500' },
+};
+
+const PRIORITY_META = {
+  critical: { label: 'CRIT', text: 'text-red-400',    bg: 'bg-red-500/10',    border: 'border-red-500/50' },
+  urgent:   { label: 'URG',  text: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-400/50' },
+  routine:  { label: 'RTN',  text: 'text-slate-400',  bg: 'bg-slate-500/10',  border: 'border-slate-500/40' },
+};
+
+const HOSPITAL_COLORS = {
+  SGH:  'text-sky-400',
+  TTSH: 'text-violet-400',
+  NUH:  'text-teal-400',
+  CGH:  'text-yellow-400',
+  KKH:  'text-pink-400',
+};
+
+// ─── SUB-COMPONENTS ───────────────────────────────────────────────────────────
+
+function StatusBadge({ status }) {
+  const m = STATUS_META[status] || STATUS_META.active;
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-mono font-semibold border ${m.bg} ${m.text} ${m.border}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${m.dot} ${status === 'active' || status === 'escalated' ? 'pulse-dot' : ''}`} />
+      {m.label}
+    </span>
+  );
+}
+
+function PriorityBadge({ priority }) {
+  const m = PRIORITY_META[priority] || PRIORITY_META.routine;
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono font-bold border ${m.bg} ${m.text} ${m.border}`}>
+      {m.label}
+    </span>
+  );
+}
+
+function EscalationDots({ level, max }) {
+  return (
+    <div className="flex items-center gap-1">
+      {Array.from({ length: max }).map((_, i) => (
+        <span
+          key={i}
+          className={`w-2 h-2 rounded-full ${i < level ? 'bg-orange-400' : 'bg-surface-600'}`}
+          title={`Escalation level ${i + 1}`}
+        />
+      ))}
+      <span className="text-xs text-slate-500 font-mono ml-1">{level}/{max}</span>
+    </div>
+  );
+}
+
+function SmsIndicator({ delivered, failed }) {
+  if (failed) return (
+    <span className="inline-flex items-center gap-1 text-xs text-red-400 font-mono">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="4.5" stroke="currentColor"/><path d="M3 3l4 4M7 3l-4 4" stroke="currentColor" strokeWidth="1.2"/></svg>
+      FAIL
+    </span>
+  );
+  if (delivered) return (
+    <span className="inline-flex items-center gap-1 text-xs text-green-400 font-mono">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1.5 5.5l2.5 2.5 4.5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+      SENT
+    </span>
+  );
+  return <span className="text-xs text-slate-500 font-mono">—</span>;
+}
+
+function Ticker({ alerts }) {
+  const criticalUnacked = alerts.filter(a => a.priority === 'critical' && !a.acknowledgedAt);
+  if (criticalUnacked.length === 0) return null;
+  return (
+    <div className="bg-red-500/10 border-b border-red-500/30 px-4 py-1.5 flex items-center gap-3 overflow-hidden">
+      <span className="text-red-400 text-xs font-mono font-bold shrink-0 uppercase tracking-wider flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 rounded-full bg-red-400 pulse-dot inline-block" />
+        {criticalUnacked.length} CRITICAL UNACKED
+      </span>
+      <div className="flex gap-4 overflow-x-auto">
+        {criticalUnacked.map(a => (
+          <span key={a.id} className="text-xs font-mono text-red-300 whitespace-nowrap">
+            {a.id} · {a.alertType} · {a.ward}/{a.bed} · {relativeTime(a.routedAt)}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub, color = 'text-white', flash = false }) {
+  return (
+    <div className={`bg-surface-800 border border-surface-600 rounded px-4 py-3 flex flex-col gap-0.5 ${flash ? 'border-red-500/50' : ''}`}>
+      <span className="text-xs text-slate-500 uppercase tracking-widest font-mono">{label}</span>
+      <span className={`text-2xl font-mono font-bold leading-none ${color}`}>{value}</span>
+      {sub && <span className="text-xs text-slate-500 font-mono mt-0.5">{sub}</span>}
+    </div>
+  );
+}
+
+function FilterBar({ hospital, setHospital, status, setStatus, priority, setPriority, search, setSearch, sort, setSort }) {
+  const hospitals = ['All', 'SGH', 'TTSH', 'NUH', 'CGH', 'KKH'];
+  const statuses = ['All', 'active', 'escalated', 'no-coverage', 'resolved'];
+  const priorities = ['All', 'critical', 'urgent'];
+
+  const btnBase = 'px-2.5 py-1 text-xs font-mono rounded border transition-colors cursor-pointer';
+  const btnActive = 'bg-surface-600 border-surface-400 text-white';
+  const btnInactive = 'bg-transparent border-surface-600 text-slate-400 hover:border-surface-400 hover:text-slate-300';
+
+  return (
+    <div className="bg-surface-800 border border-surface-600 rounded p-3 flex flex-wrap items-center gap-3">
+      {/* Search */}
+      <div className="flex items-center gap-2 bg-surface-700 border border-surface-600 rounded px-3 py-1.5 min-w-48">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="text-slate-500">
+          <circle cx="5" cy="5" r="4" stroke="currentColor" strokeWidth="1.2"/>
+          <path d="M8 8l3 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+        </svg>
+        <input
+          type="text"
+          placeholder="Alert ID, patient, ward…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="bg-transparent text-xs font-mono text-slate-200 placeholder-slate-600 outline-none w-full"
+        />
+      </div>
+
+      {/* Hospital filter */}
+      <div className="flex items-center gap-1">
+        <span className="text-xs text-slate-500 font-mono mr-1">HOSP</span>
+        {hospitals.map(h => (
+          <button key={h} onClick={() => setHospital(h)}
+            className={`${btnBase} ${hospital === h ? btnActive : btnInactive}`}>
+            {h === 'All' ? 'ALL' : h}
+          </button>
+        ))}
+      </div>
+
+      {/* Status filter */}
+      <div className="flex items-center gap-1">
+        <span className="text-xs text-slate-500 font-mono mr-1">STATUS</span>
+        {statuses.map(s => (
+          <button key={s} onClick={() => setStatus(s)}
+            className={`${btnBase} ${status === s ? btnActive : btnInactive} ${s !== 'All' && s !== status ? `${STATUS_META[s]?.text || ''} opacity-60` : ''}`}>
+            {s === 'All' ? 'ALL' : STATUS_META[s]?.label || s.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      {/* Priority filter */}
+      <div className="flex items-center gap-1">
+        <span className="text-xs text-slate-500 font-mono mr-1">PRIORITY</span>
+        {priorities.map(p => (
+          <button key={p} onClick={() => setPriority(p)}
+            className={`${btnBase} ${priority === p ? btnActive : btnInactive}`}>
+            {p === 'All' ? 'ALL' : p.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      {/* Sort */}
+      <div className="ml-auto flex items-center gap-1">
+        <span className="text-xs text-slate-500 font-mono">SORT</span>
+        {[['time', 'TIME'], ['priority', 'PRIORITY'], ['status', 'STATUS'], ['hospital', 'HOSP']].map(([k, label]) => (
+          <button key={k} onClick={() => setSort(k)}
+            className={`${btnBase} ${sort === k ? btnActive : btnInactive}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AlertRow({ alert, selected, onSelect }) {
+  const isFlash = alert.priority === 'critical' && !alert.acknowledgedAt && alert.status !== 'resolved';
+
+  return (
+    <tr
+      onClick={() => onSelect(alert.id)}
+      className={`border-b border-surface-700 cursor-pointer transition-colors
+        ${selected ? 'bg-surface-750' : 'hover:bg-surface-750/50'}
+        ${isFlash ? 'flash-critical' : ''}
+      `}
+    >
+      {/* Alert ID */}
+      <td className="px-3 py-2 font-mono text-xs text-slate-300 whitespace-nowrap">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-slate-200">{alert.id}</span>
+          <span className="text-slate-600 text-xs">{relativeTime(alert.routedAt)}</span>
+        </div>
+      </td>
+
+      {/* Priority + Status */}
+      <td className="px-2 py-2 whitespace-nowrap">
+        <div className="flex flex-col gap-1">
+          <PriorityBadge priority={alert.priority} />
+          <StatusBadge status={alert.status} />
+        </div>
+      </td>
+
+      {/* Alert Type + Detail */}
+      <td className="px-3 py-2 max-w-xs">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs font-semibold text-slate-100">{alert.alertType}</span>
+          <span className="text-xs text-slate-500 truncate max-w-56" title={alert.detail}>{alert.detail}</span>
+        </div>
+      </td>
+
+      {/* Hospital / Ward / Bed */}
+      <td className="px-3 py-2 whitespace-nowrap">
+        <div className="flex flex-col gap-0.5">
+          <span className={`text-xs font-mono font-bold ${HOSPITAL_COLORS[alert.hospital] || 'text-slate-300'}`}>{alert.hospital}</span>
+          <span className="text-xs text-slate-400 font-mono">Ward {alert.ward} · {alert.bed}</span>
+        </div>
+      </td>
+
+      {/* Patient ID / MRN */}
+      <td className="px-3 py-2 whitespace-nowrap">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs font-mono text-slate-200">{alert.patientId}</span>
+          <span className="text-xs text-slate-500 font-mono">MRN {alert.mrn}</span>
+        </div>
+      </td>
+
+      {/* Assigned clinician */}
+      <td className="px-3 py-2 whitespace-nowrap">
+        {alert.assignedTo ? (
+          <div className="flex flex-col gap-0.5">
+            <span className="text-xs text-slate-200">{alert.assignedTo.name}</span>
+            <span className="text-xs text-slate-500">{alert.assignedTo.role} · {alert.assignedTo.specialty}</span>
+          </div>
+        ) : (
+          <span className="text-xs text-red-400 font-mono font-semibold">UNASSIGNED</span>
+        )}
+      </td>
+
+      {/* Escalation */}
+      <td className="px-3 py-2 whitespace-nowrap">
+        <EscalationDots level={alert.escalationLevel} max={alert.escalationMax} />
+      </td>
+
+      {/* SMS status */}
+      <td className="px-3 py-2 whitespace-nowrap">
+        <SmsIndicator delivered={alert.smsDelivered} failed={alert.smsFailed} />
+      </td>
+
+      {/* Response time */}
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-xs">
+        {alert.responseTime !== null ? (
+          <span className={alert.responseTime <= 7 ? 'text-green-400' : 'text-orange-400'}>
+            {alert.responseTime}m
+          </span>
+        ) : alert.acknowledgedAt ? (
+          <span className="text-slate-500">—</span>
+        ) : (
+          <span className="text-slate-500">Pending</span>
+        )}
+      </td>
+
+      {/* Routed at / acked at */}
+      <td className="px-3 py-2 whitespace-nowrap">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs font-mono text-slate-400">{formatTime(alert.routedAt)}</span>
+          {alert.acknowledgedAt ? (
+            <span className="text-xs font-mono text-green-400">{formatTime(alert.acknowledgedAt)}</span>
+          ) : (
+            <span className="text-xs font-mono text-slate-600">Not acked</span>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function DetailPanel({ alert, onClose }) {
+  if (!alert) return null;
+  const s = STATUS_META[alert.status];
+
+  return (
+    <div className="bg-surface-800 border border-surface-600 rounded overflow-hidden flex flex-col">
+      {/* Panel header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-surface-600 bg-surface-750">
+        <div className="flex items-center gap-3">
+          <StatusBadge status={alert.status} />
+          <PriorityBadge priority={alert.priority} />
+          <span className="text-xs font-mono text-slate-400">{alert.id}</span>
+        </div>
+        <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-xs font-mono cursor-pointer bg-transparent border-none px-2 py-1">
+          ✕ CLOSE
+        </button>
+      </div>
+
+      <div className="p-4 flex flex-col gap-4 overflow-y-auto">
+        {/* Alert summary */}
+        <div>
+          <div className="text-xs text-slate-500 uppercase tracking-widest font-mono mb-2">Alert Details</div>
+          <div className="bg-surface-700 rounded p-3 space-y-2">
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Type</span>
+              <span className="text-xs font-semibold text-slate-100">{alert.alertType}</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Finding</span>
+              <span className="text-xs text-slate-200">{alert.detail}</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Hospital</span>
+              <span className={`text-xs font-mono font-bold ${HOSPITAL_COLORS[alert.hospital] || 'text-slate-300'}`}>{alert.hospital}</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Location</span>
+              <span className="text-xs text-slate-200 font-mono">Ward {alert.ward}, Bed {alert.bed}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Patient */}
+        <div>
+          <div className="text-xs text-slate-500 uppercase tracking-widest font-mono mb-2">Patient</div>
+          <div className="bg-surface-700 rounded p-3 space-y-2">
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Patient ID</span>
+              <span className="text-xs text-slate-200 font-mono">{alert.patientId}</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">MRN</span>
+              <span className="text-xs text-slate-200 font-mono">{alert.mrn}</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Specialty</span>
+              <span className="text-xs text-slate-200">{alert.specialty}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Routing / Escalation */}
+        <div>
+          <div className="text-xs text-slate-500 uppercase tracking-widest font-mono mb-2">Routing & Escalation</div>
+          <div className="bg-surface-700 rounded p-3 space-y-2">
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Assigned To</span>
+              <span className="text-xs text-slate-200">
+                {alert.assignedTo ? `${alert.assignedTo.name} (${alert.assignedTo.role})` : <span className="text-red-400 font-semibold">UNASSIGNED</span>}
+              </span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">Escalation</span>
+              <EscalationDots level={alert.escalationLevel} max={alert.escalationMax} />
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-xs text-slate-500 font-mono w-24 shrink-0">SMS Status</span>
+              <SmsIndicator delivered={alert.smsDelivered} failed={alert.smsFailed} />
+            </div>
+          </div>
+        </div>
+
+        {/* Timeline */}
+        <div>
+          <div className="text-xs text-slate-500 uppercase tracking-widest font-mono mb-2">Timeline</div>
+          <div className="relative pl-4">
+            <div className="absolute left-1.5 top-0 bottom-0 w-px bg-surface-600" />
+            {[
+              { label: 'Alert triggered', time: alert.routedAt, color: 'bg-blue-400' },
+              { label: 'SMS dispatched', time: alert.smsDelivered ? new Date(alert.routedAt.getTime() + 15000) : null, color: alert.smsFailed ? 'bg-red-400' : 'bg-green-400' },
+              { label: 'Acknowledged', time: alert.acknowledgedAt, color: 'bg-green-400' },
+            ].map((evt, i) => (
+              <div key={i} className="flex items-start gap-3 mb-3 relative">
+                <span className={`w-2 h-2 rounded-full mt-0.5 shrink-0 -ml-4 relative z-10 ${evt.time ? evt.color : 'bg-surface-600'}`} />
+                <div>
+                  <div className="text-xs text-slate-300">{evt.label}</div>
+                  <div className="text-xs font-mono text-slate-500">{evt.time ? formatTime(evt.time) : 'Pending'}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Response code */}
+        {alert.responseCode && (
+          <div>
+            <div className="text-xs text-slate-500 uppercase tracking-widest font-mono mb-2">Response</div>
+            <div className="bg-green-500/10 border border-green-500/30 rounded p-3">
+              <div className="text-xs text-green-300 font-mono">
+                Code {alert.responseCode} — Acknowledged &amp; actioning
+              </div>
+              {alert.responseTime && (
+                <div className="text-xs text-slate-400 font-mono mt-1">
+                  Response time: <span className={alert.responseTime <= 7 ? 'text-green-400' : 'text-orange-400'}>{alert.responseTime} min</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div>
+          <div className="text-xs text-slate-500 uppercase tracking-widest font-mono mb-2">Actions</div>
+          <div className="flex flex-wrap gap-2">
+            {alert.status !== 'resolved' && (
+              <>
+                <button className="px-3 py-1.5 text-xs font-mono bg-green-500/15 border border-green-500/40 text-green-400 rounded hover:bg-green-500/25 cursor-pointer transition-colors">
+                  Mark Resolved
+                </button>
+                <button className="px-3 py-1.5 text-xs font-mono bg-orange-500/15 border border-orange-500/40 text-orange-400 rounded hover:bg-orange-500/25 cursor-pointer transition-colors">
+                  Force Escalate
+                </button>
+                <button className="px-3 py-1.5 text-xs font-mono bg-blue-500/15 border border-blue-500/40 text-blue-400 rounded hover:bg-blue-500/25 cursor-pointer transition-colors">
+                  Reassign
+                </button>
+              </>
+            )}
+            <button className="px-3 py-1.5 text-xs font-mono bg-surface-700 border border-surface-600 text-slate-400 rounded hover:border-surface-400 cursor-pointer transition-colors">
+              View Audit Log
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ROUTE SIMULATOR ─────────────────────────────────────────────────────────
+
+function RouteSimulator() {
+  const now = new Date();
+  const currentHHMM = now.toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+  const [simHospital, setSimHospital]         = React.useState('SGH');
+  const [simSpecialty, setSimSpecialty]       = React.useState('Haematology');
+  const [simResultType, setSimResultType]     = React.useState('Critical Result');
+  const [simTime, setSimTime]                 = React.useState(currentHHMM);
+  const [simResult, setSimResult]             = React.useState(null);
+
+  const hospitals   = ['SGH', 'TTSH', 'NUH', 'CGH', 'KKH'];
+  const resultTypes = ['Critical Result', 'Unexpected Result'];
+
+  function runSimulation() {
+    const key = `${simHospital}:${simSpecialty}`;
+    const rule = ROUTING_RULES[key];
+    if (!rule) {
+      setSimResult({ error: true, key });
+      return;
+    }
+    const chain = rule.chain;
+    const activeIndex = isOnCall(chain[0], simTime) ? 0 : 1;
+    const handoverMins = minutesToHandover(chain[activeIndex], simTime);
+    const handoverWarning = handoverMins >= 0 && handoverMins <= 30;
+    setSimResult({ rule, chain, activeIndex, handoverWarning, handoverMins, key });
+  }
+
+  const selectBase = 'w-full bg-surface-700 border border-surface-600 rounded px-3 py-2 text-xs font-mono text-slate-200 outline-none focus:border-accent-blue cursor-pointer';
+  const labelCls   = 'text-xs font-mono text-slate-500 uppercase tracking-widest mb-1 block';
+
+  return (
+    <div className="flex-1 overflow-auto px-4 py-4">
+
+      {/* Panel header */}
+      <div className="mb-4">
+        <div className="text-sm font-semibold text-white">Routing Verification</div>
+        <div className="text-xs text-slate-500 font-mono mt-0.5">
+          Verify who receives an alert before it is sent — simulates Rooster routing rules for the selected hospital, specialty, and time.
+        </div>
+      </div>
+
+      <div className="flex gap-4 items-start">
+
+        {/* ── LEFT: Input form ── */}
+        <div className="w-72 shrink-0 bg-surface-800 border border-surface-600 rounded p-4 flex flex-col gap-4">
+          <div className="text-xs font-mono text-slate-400 uppercase tracking-widest border-b border-surface-600 pb-2">
+            Simulation inputs
+          </div>
+
+          <div>
+            <label className={labelCls}>Hospital</label>
+            <select value={simHospital} onChange={e => setSimHospital(e.target.value)} className={selectBase}>
+              {hospitals.map(h => <option key={h} value={h}>{h}</option>)}
+            </select>
+          </div>
+
+          <div>
+            <label className={labelCls}>Specialty</label>
+            <select value={simSpecialty} onChange={e => setSimSpecialty(e.target.value)} className={selectBase}>
+              {SPECIALTIES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+
+          <div>
+            <label className={labelCls}>Result type</label>
+            <div className="flex gap-2">
+              {resultTypes.map(rt => (
+                <button
+                  key={rt}
+                  onClick={() => setSimResultType(rt)}
+                  className={`flex-1 px-2 py-2 text-xs font-mono rounded border transition-colors cursor-pointer ${
+                    simResultType === rt
+                      ? rt === 'Critical Result'
+                        ? 'bg-red-500/20 border-red-500/50 text-red-300'
+                        : 'bg-orange-500/20 border-orange-500/50 text-orange-300'
+                      : 'bg-transparent border-surface-600 text-slate-400 hover:border-surface-400'
+                  }`}>
+                  {rt}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className={labelCls}>Simulated time</label>
+            <input
+              type="time"
+              value={simTime}
+              onChange={e => setSimTime(e.target.value)}
+              className={selectBase}
+            />
+            <div className="text-xs text-slate-600 font-mono mt-1">Current: {currentHHMM}</div>
+          </div>
+
+          <button
+            onClick={runSimulation}
+            className="w-full py-2.5 text-xs font-mono font-bold bg-accent-blue/15 border border-accent-blue/40 text-accent-blue rounded hover:bg-accent-blue/25 transition-colors cursor-pointer uppercase tracking-wider"
+          >
+            Run simulation →
+          </button>
+        </div>
+
+        {/* ── RIGHT: Output ── */}
+        <div className="flex-1 min-w-0">
+          {!simResult ? (
+            <div className="bg-surface-800 border border-surface-600 border-dashed rounded p-8 flex flex-col items-center justify-center gap-2 text-center">
+              <div className="w-8 h-8 rounded bg-surface-700 border border-surface-600 flex items-center justify-center">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M8 1v6M8 9v6M1 8h6M9 8h6" stroke="#4d5562" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              </div>
+              <div className="text-xs text-slate-600 font-mono">Configure inputs and run simulation to see routing chain</div>
+            </div>
+          ) : simResult.error ? (
+            <div className="bg-red-500/10 border border-red-500/30 rounded p-4">
+              <div className="text-xs font-mono font-bold text-red-400 mb-1">NO ROUTING RULE FOUND</div>
+              <div className="text-xs text-slate-400 font-mono">
+                No on-call configuration exists for <span className="text-white">{simResult.key}</span>.
+                This specialty is unmapped at this hospital — a result arriving now would have no recipient.
+              </div>
+              <div className="mt-3 text-xs text-slate-500 font-mono border-t border-red-500/20 pt-3">
+                Action required: hospital admin must configure this specialty routing before alerts can be delivered.
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+
+              {/* Summary card */}
+              <div className={`rounded p-3 border text-xs font-mono ${
+                simResultType === 'Critical Result'
+                  ? 'bg-red-500/10 border-red-500/30 text-red-300'
+                  : 'bg-orange-500/10 border-orange-500/30 text-orange-300'
+              }`}>
+                <span className="font-bold">{simResultType === 'Critical Result' ? 'CRITICAL' : 'UNEXPECTED'}</span>
+                {' '}result · <span className="text-white">{simSpecialty}</span> · <span className="text-white">{simHospital}</span> · arriving at <span className="text-white">{simTime}</span>
+              </div>
+
+              {/* Handover warning */}
+              {simResult.handoverWarning && (
+                <div className="bg-orange-500/10 border border-orange-500/40 rounded p-3 flex items-start gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-orange-400 pulse-dot mt-1 shrink-0" />
+                  <div className="text-xs font-mono text-orange-300">
+                    <span className="font-bold">On-call handover in {simResult.handoverMins} min</span> — verify coverage continuity before sending.
+                    The primary clinician's shift ends at {simResult.chain[simResult.activeIndex].onCallEnd}.
+                  </div>
+                </div>
+              )}
+
+              {/* Routing chain */}
+              <div className="bg-surface-800 border border-surface-600 rounded overflow-hidden">
+                <div className="px-4 py-2.5 border-b border-surface-600 bg-surface-750 text-xs font-mono text-slate-400 uppercase tracking-widest">
+                  Escalation chain — {simHospital} {simSpecialty}
+                </div>
+                <div className="p-4 relative">
+                  <div className="absolute left-6 top-8 bottom-8 w-px bg-surface-600" />
+                  {simResult.chain.map((clinician, i) => {
+                    const isActive = i === simResult.activeIndex;
+                    const onCall   = isOnCall(clinician, simTime);
+                    const minsLeft = minutesToHandover(clinician, simTime);
+                    return (
+                      <div key={i} className={`flex items-start gap-4 mb-5 last:mb-0 relative`}>
+                        {/* Level dot */}
+                        <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 z-10 ${
+                          isActive
+                            ? 'border-accent-blue bg-accent-blue/30'
+                            : 'border-surface-500 bg-surface-800'
+                        }`}>
+                          {isActive && <span className="w-1.5 h-1.5 rounded-full bg-accent-blue pulse-dot" />}
+                        </div>
+
+                        {/* Content */}
+                        <div className={`flex-1 bg-surface-700 rounded p-3 border ${
+                          isActive ? 'border-accent-blue/40' : 'border-surface-600'
+                        }`}>
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className={`text-xs font-semibold ${isActive ? 'text-white' : 'text-slate-400'}`}>
+                                {clinician.name}
+                              </div>
+                              <div className="text-xs text-slate-500 font-mono mt-0.5">
+                                {clinician.role} · {clinician.phone}
+                              </div>
+                            </div>
+                            <div className="flex flex-col items-end gap-1 shrink-0">
+                              {isActive && (
+                                <span className="px-1.5 py-0.5 bg-accent-blue/15 border border-accent-blue/40 rounded text-xs font-mono font-bold text-accent-blue">
+                                  PAGED FIRST
+                                </span>
+                              )}
+                              {!isActive && i > 0 && (
+                                <span className="text-xs font-mono text-slate-500">
+                                  +{i * 10} min
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3 mt-2 text-xs font-mono text-slate-500">
+                            <span className={`flex items-center gap-1 ${onCall ? 'text-green-400' : 'text-slate-600'}`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${onCall ? 'bg-green-400' : 'bg-surface-600'}`} />
+                              On-call {clinician.onCallStart}–{clinician.onCallEnd}
+                            </span>
+                            {isActive && onCall && minsLeft > 0 && minsLeft <= 60 && (
+                              <span className="text-orange-400">{minsLeft}min to handover</span>
+                            )}
+                          </div>
+
+                          {i > 0 && (
+                            <div className="mt-2 text-xs text-slate-600 font-mono border-t border-surface-600 pt-2">
+                              {i === 1 ? 'Escalates if no ack after 10 min' : 'Final escalation — no further chain'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Coverage footer */}
+                <div className="px-4 py-2.5 border-t border-surface-600 bg-surface-750 flex items-center justify-between">
+                  <span className="text-xs font-mono text-slate-500">
+                    3-level chain · auto-escalation every 10 min
+                  </span>
+                  <span className="flex items-center gap-1.5 text-xs font-mono text-green-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                    Coverage confirmed
+                  </span>
+                </div>
+              </div>
+
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+
+function App() {
+  const [activeTab, setActiveTab] = useState('monitor');
+  const [alerts, setAlerts] = useState(INITIAL_ALERTS);
+  const [now, setNow] = useState(new Date());
+  const [selectedId, setSelectedId] = useState('ALT-2026-000391');
+  const [filterHospital, setFilterHospital] = useState('All');
+  const [filterStatus, setFilterStatus] = useState('All');
+  const [filterPriority, setFilterPriority] = useState('All');
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState('time');
+
+  // Tick clock every second
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Filter + sort
+  const filtered = alerts
+    .filter(a => {
+      if (filterHospital !== 'All' && a.hospital !== filterHospital) return false;
+      if (filterStatus !== 'All' && a.status !== filterStatus) return false;
+      if (filterPriority !== 'All' && a.priority !== filterPriority) return false;
+      if (search) {
+        const q = search.toLowerCase();
+        return (
+          a.id.toLowerCase().includes(q) ||
+          a.patientId.toLowerCase().includes(q) ||
+          a.mrn.includes(q) ||
+          a.ward.toLowerCase().includes(q) ||
+          a.alertType.toLowerCase().includes(q) ||
+          (a.assignedTo && a.assignedTo.name.toLowerCase().includes(q))
+        );
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      if (sort === 'time') return b.routedAt - a.routedAt;
+      if (sort === 'priority') {
+        const p = { critical: 0, urgent: 1, routine: 2 };
+        return (p[a.priority] ?? 9) - (p[b.priority] ?? 9);
+      }
+      if (sort === 'status') {
+        const s = { 'no-coverage': 0, escalated: 1, active: 2, resolved: 3 };
+        return (s[a.status] ?? 9) - (s[b.status] ?? 9);
+      }
+      if (sort === 'hospital') return a.hospital.localeCompare(b.hospital);
+      return 0;
+    });
+
+  // Stats
+  const activeCount    = alerts.filter(a => a.status === 'active').length;
+  const escalatedCount = alerts.filter(a => a.status === 'escalated').length;
+  const noCoverCount   = alerts.filter(a => a.status === 'no-coverage').length;
+  const resolvedToday  = alerts.filter(a => a.status === 'resolved').length;
+  const responseTimes  = alerts.filter(a => a.responseTime !== null).map(a => a.responseTime);
+  const avgResponse    = responseTimes.length
+    ? (responseTimes.reduce((s, v) => s + v, 0) / responseTimes.length).toFixed(1)
+    : '—';
+  const criticalUnacked = alerts.filter(a => a.priority === 'critical' && !a.acknowledgedAt).length;
+
+  const selectedAlert = alerts.find(a => a.id === selectedId);
+
+  const currentTime = now.toLocaleTimeString('en-SG', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  const currentDate = now.toLocaleDateString('en-SG', {
+    weekday: 'short', day: '2-digit', month: 'short', year: 'numeric',
+  });
+
+  return (
+    <div className="min-h-screen bg-surface-900 text-slate-200 flex flex-col">
+
+      {/* ── HEADER ── */}
+      <header className="bg-surface-800 border-b border-surface-600 px-4 py-2.5 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded bg-blue-500/20 border border-blue-500/40 flex items-center justify-center">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path d="M7 1v4M7 9v4M1 7h4M9 7h4" stroke="#58a6ff" strokeWidth="1.5" strokeLinecap="round"/>
+                <circle cx="7" cy="7" r="2" fill="#58a6ff" fillOpacity=".3" stroke="#58a6ff" strokeWidth="1"/>
+              </svg>
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-white leading-none">Rooster</div>
+              <div className="text-xs text-slate-500 leading-none mt-0.5">Clinical Alert Monitor</div>
+            </div>
+          </div>
+          <div className="w-px h-8 bg-surface-600" />
+          <div className="text-xs text-slate-400 font-mono">All Hospitals · SingHealth Cluster</div>
+        </div>
+
+        <div className="flex items-center gap-5">
+          {/* Tab toggle */}
+          <div className="flex items-center bg-surface-700 border border-surface-600 rounded overflow-hidden">
+            {[['monitor', 'Alert Monitor'], ['simulator', 'Route Simulator']].map(([tab, label]) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-3 py-1.5 text-xs font-mono transition-colors cursor-pointer border-none ${
+                  activeTab === tab
+                    ? tab === 'simulator'
+                      ? 'bg-accent-blue/20 text-accent-blue'
+                      : 'bg-surface-600 text-white'
+                    : 'bg-transparent text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {criticalUnacked > 0 && activeTab === 'monitor' && (
+            <div className="flex items-center gap-2 bg-red-500/15 border border-red-500/40 rounded px-3 py-1.5">
+              <span className="w-2 h-2 rounded-full bg-red-400 pulse-dot" />
+              <span className="text-xs font-mono font-bold text-red-300">{criticalUnacked} CRITICAL AWAITING</span>
+            </div>
+          )}
+          <div className="text-right">
+            <div className="text-sm font-mono text-white">{currentTime}</div>
+            <div className="text-xs text-slate-500">{currentDate}</div>
+          </div>
+          <div className="w-px h-8 bg-surface-600" />
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-full bg-teal-500/30 border border-teal-500/50 flex items-center justify-center text-xs font-bold text-teal-300">
+              TL
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-slate-200">Tan Li Ling</div>
+              <div className="text-xs text-slate-500">Clinical Coordinator · SGH</div>
+            </div>
+          </div>
+          <div className="w-2 h-2 rounded-full bg-green-400" title="System online" />
+        </div>
+      </header>
+
+      {/* ── TICKER (monitor only) ── */}
+      {activeTab === 'monitor' && <Ticker alerts={alerts} />}
+
+      {/* ── ROUTE SIMULATOR VIEW ── */}
+      {activeTab === 'simulator' && <RouteSimulator />}
+
+      {/* ── MONITOR VIEW ── */}
+      {activeTab === 'monitor' && <>
+
+      {/* ── STATS BAR ── */}
+      <div className="px-4 pt-3 pb-2 grid grid-cols-6 gap-2 shrink-0">
+        <StatCard
+          label="Active Alerts"
+          value={activeCount}
+          sub="Awaiting acknowledgment"
+          color="text-blue-400"
+        />
+        <StatCard
+          label="Escalated"
+          value={escalatedCount}
+          sub="Past response threshold"
+          color="text-orange-400"
+          flash={escalatedCount > 0}
+        />
+        <StatCard
+          label="No Coverage"
+          value={noCoverCount}
+          sub="No available clinician"
+          color="text-red-400"
+          flash={noCoverCount > 0}
+        />
+        <StatCard
+          label="Resolved Today"
+          value={resolvedToday}
+          sub="Within current shift"
+          color="text-green-400"
+        />
+        <StatCard
+          label="Avg Response"
+          value={`${avgResponse}m`}
+          sub="Across resolved alerts"
+          color={parseFloat(avgResponse) <= 7.5 ? 'text-green-400' : 'text-orange-400'}
+        />
+        <StatCard
+          label="Total Alerts"
+          value={alerts.length}
+          sub={`${filtered.length} in view`}
+          color="text-slate-300"
+        />
+      </div>
+
+      {/* ── FILTER BAR ── */}
+      <div className="px-4 pb-2 shrink-0">
+        <FilterBar
+          hospital={filterHospital} setHospital={setFilterHospital}
+          status={filterStatus} setStatus={setFilterStatus}
+          priority={filterPriority} setPriority={setFilterPriority}
+          search={search} setSearch={setSearch}
+          sort={sort} setSort={setSort}
+        />
+      </div>
+
+      {/* ── MAIN CONTENT (table + detail panel) ── */}
+      <div className="flex flex-1 gap-2 px-4 pb-4 overflow-hidden min-h-0">
+
+        {/* Table */}
+        <div className="flex-1 bg-surface-800 border border-surface-600 rounded overflow-hidden flex flex-col min-w-0">
+          {/* Table header */}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-surface-600 bg-surface-750 shrink-0">
+            <span className="text-xs font-mono text-slate-400 uppercase tracking-wider">
+              Alert Queue — {filtered.length} record{filtered.length !== 1 ? 's' : ''}
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-600 font-mono">Last refresh: {currentTime}</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-green-400 pulse-dot" />
+            </div>
+          </div>
+
+          {/* Scrollable table */}
+          <div className="overflow-auto flex-1">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 bg-surface-750 z-10">
+                <tr className="border-b border-surface-600">
+                  {[
+                    'Alert ID',
+                    'Status',
+                    'Type / Finding',
+                    'Hospital / Location',
+                    'Patient',
+                    'Assigned Clinician',
+                    'Escalation',
+                    'SMS',
+                    'Resp. Time',
+                    'Routed / Acked',
+                  ].map(h => (
+                    <th key={h} className="px-3 py-2 text-xs font-mono font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="px-4 py-8 text-center text-slate-600 text-sm font-mono">
+                      No alerts match current filters
+                    </td>
+                  </tr>
+                ) : (
+                  filtered.map(alert => (
+                    <AlertRow
+                      key={alert.id}
+                      alert={alert}
+                      selected={selectedId === alert.id}
+                      onSelect={setSelectedId}
+                    />
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Footer */}
+          <div className="px-3 py-2 border-t border-surface-600 bg-surface-750 shrink-0 flex items-center justify-between">
+            <div className="flex items-center gap-4 text-xs font-mono text-slate-500">
+              <span>
+                <span className="w-2 h-2 rounded-full bg-red-400 inline-block mr-1" />
+                Critical rows flash until acknowledged
+              </span>
+              <span>Click row to inspect</span>
+            </div>
+            <div className="flex items-center gap-3 text-xs font-mono text-slate-600">
+              <span>SMS escalation: auto after <span className="text-slate-400">10 min</span></span>
+              <span>Max escalation depth: <span className="text-slate-400">3</span></span>
+            </div>
+          </div>
+        </div>
+
+        {/* Detail panel */}
+        <div className="w-80 shrink-0">
+          {selectedAlert ? (
+            <DetailPanel alert={selectedAlert} onClose={() => setSelectedId(null)} />
+          ) : (
+            <div className="bg-surface-800 border border-surface-600 rounded h-full flex items-center justify-center">
+              <span className="text-xs text-slate-600 font-mono">Select an alert to inspect</span>
+            </div>
+          )}
+        </div>
+
+      </div>
+
+      </> /* end monitor view */}
+
+      {/* ── FOOTER ── */}
+      <footer className="border-t border-surface-700 px-4 py-2 flex items-center justify-between bg-surface-800 shrink-0">
+        <div className="flex items-center gap-4 text-xs font-mono text-slate-600">
+          <span>Rooster v2.4.1</span>
+          <span>·</span>
+          <span>Open Government Products</span>
+          <span>·</span>
+          <span>SingHealth Cluster — SGH, TTSH, CGH, NUH, KKH</span>
+        </div>
+        <div className="flex items-center gap-3 text-xs font-mono">
+          <span className="text-slate-600">System status:</span>
+          <span className="flex items-center gap-1.5 text-green-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+            Operational
+          </span>
+          <span className="text-slate-600">SMS gateway:</span>
+          <span className="flex items-center gap-1.5 text-green-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+            Online
+          </span>
+          <span className="text-slate-600">HIS integration:</span>
+          <span className="flex items-center gap-1.5 text-green-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+            Synced
+          </span>
+        </div>
+      </footer>
+
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
